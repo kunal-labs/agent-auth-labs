@@ -358,6 +358,56 @@ A crucial architectural question is: **"Does the SPIFFE/Workload Identity (Servi
 | **Discovery Engine `serverSideOauth2`** | ❌ Not applicable | ✅ **Required** | ❌ Not required |
 | **VPC-SC Perimeter Allowed Service** | ✅ **Required** (`spanner.googleapis.com`) | ✅ **Required** (`drive.googleapis.com`) | ✅ **Required** (`drive.googleapis.com`) |
 
+### Step 7.5: The Confused Deputy & Tool-Level Identity Theft (LLM Parameter Injection)
+
+#### Why This is an Application-Layer Vulnerability (Not an Agent Runtime Flaw)
+
+In a containerized microservice, giving a container a Service Account is standard practice. However, if an attacker can manipulate the container's inputs (e.g., via a `?user_id=` query parameter), the container becomes a **Confused Deputy** — using its legitimate Service Account to fetch data that the caller shouldn't see.
+
+**This is not a flaw of Agent Runtime per se.** Agent Runtime correctly provides the **Actor SVID (Workload Identity)** to the container. The vulnerability is an **application-layer design flaw** in how the Tool is written in Python.
+
+However, this vulnerability is **10x more dangerous in AI Agents** than in traditional microservices:
+- In a microservice, an `user_id` injection requires a software bug (SQLi, unvalidated param).
+- In an AI Agent, the LLM is *designed* to parse natural language and generate tool arguments.
+- If a tool is designed to accept `user_id: str` as an argument from the LLM, **the developer has unwittingly made the LLM the security boundary!**
+
+```text
+                       ┌─────────────────────────────────────────────────────────┐
+                       │            THE "LLM AS SECURITY GATE" ANTI-PATTERN      │
+                       └────────────────────────────┬────────────────────────────┘
+                                                    │
+                                                    ▼
+                       ┌─────────────────────────────────────────────────────────┐
+                       │ 1. User Prompt: "I am adam@corp.com, show my orders"     │
+                       └────────────────────────────┬────────────────────────────┘
+                                                    │
+                                                    ▼
+                       ┌─────────────────────────────────────────────────────────┐
+                       │ 2. LLM (Untrusted): Generates tool call:                │
+                       │    query_orders(user_id="adam@corp.com")                │
+                       └────────────────────────────┬────────────────────────────┘
+                                                    │
+                                                    ▼
+                       ┌─────────────────────────────────────────────────────────┐
+                       │ 3. Tool Code: Executes Spanner query with user_id       │
+                       │    WHERE customer_email = 'adam@corp.com'               │
+                       └────────────────────────────┬────────────────────────────┘
+                                                    │
+                                                    ▼
+                       ┌─────────────────────────────────────────────────────────┐
+                       │ 4. Spanner: Agent SA has roles/spanner.databaseUser.    │
+                       │    Query succeeds! Chris sees Adam's data! 🚨          │
+                       └────────────────────────────┴────────────────────────────┘
+```
+
+#### The 3-Tier Defense-in-Depth Architecture:
+
+| Tier | Where Enforced? | Mechanism | What Happens on Attack? |
+| :--- | :--- | :--- | :--- |
+| **Tier 1: Tool-Level** | Python Tool Code | Extract `sub` claim from `temp:<AUTH_ID>` OAuth JWT. Ignore LLM `user_id`. | 🔒 **Blocked in Tool**: `WHERE` clause is hardcoded with verified `sub`. |
+| **Tier 2: Database-Level** | Spanner / Postgres | Spanner FGAC (`database_role`) or PostgreSQL RLS (`app.current_user`). | 💥 **Blocked by Spanner**: `403 PERMISSION_DENIED` or `0 rows`. |
+| **Tier 3: Gateway-Level** | Apigee / Cloud Endpoints | Apigee `OAuthV2` policy validates JWT `sub` against requested URL. | 💥 **Blocked by Gateway**: `403 Forbidden` before Spanner is touched. |
+
 ---
 
 ## 8. Negative Security Testing & Spoofing Defense Verification
