@@ -1,0 +1,25 @@
+[project]
+name = "enterprise-adk-agent-auth"
+version = "0.1.0"
+description = "Enterprise ADK Agent Auth with Gemini Enterprise & SPIFFE Workload Identity"
+authors = [{ name = "Google Cloud CE", email = "kunall@google.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    "google-adk>=0.5.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-auth-oauthlib>=1.2.0",
+    "requests>=2.31.0",
+    "fastapi>=0.100.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "ruff>=0.1.0",
+    "codespell>=2.2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
