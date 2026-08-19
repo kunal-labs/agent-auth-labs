@@ -255,6 +255,66 @@ Now you will verify that the agent can read a private Google Drive file on behal
 4. **Observe the OAuth Handshake**: Gemini Enterprise detects that the agent requires `google-drive-auth`, renders a consent prompt, and asks you to authorize `drive.readonly` access.
 5. After granting consent, Gemini Enterprise injects the token into `temp:google-drive-auth` and the agent returns the summarized document!
 
+### Step 7.3: Architectural Deep Dive — Accessing Cloud Spanner (User-Plane vs. Service-Plane)
+
+A common architectural question in enterprise agent design is: **"If the agent needs to access Google Drive AND Cloud Spanner in the same turn, how does the auth flow change?"**
+
+#### The Core Distinction:
+- **Google Drive** is a **User-Plane Resource**: It requires 3-legged OAuth (`drive.readonly`) because files belong to `alice@corp.com`.
+- **Cloud Spanner** is a **Service-Plane Resource**: It is an enterprise database owned by the GCP project. It uses the Agent's **Hardware-Backed Workload Identity (Actor SVID)** and GCP IAM (`roles/spanner.databaseUser`).
+
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        USER-PLANE VS. SERVICE-PLANE RESOURCES                          │
+├──────────────────────────────────────┬─────────────────────────────────────────────────┤
+│ RESOURCE TYPE                        │ AUTHENTICATION & AUTHORIZATION MECHANISM        │
+├──────────────────────────────────────┼─────────────────────────────────────────────────┤
+│ Google Drive, Gmail, Calendar, Docs  │ • USER-PLANE (3-Legged OAuth 2.0)               │
+│ (User-Scoped Data)                   │ • Requires end-user consent via Discovery Engine│
+│                                      │ • Authenticates using User OAuth JWT (Subject)  │
+├──────────────────────────────────────┼─────────────────────────────────────────────────┤
+│ Cloud Spanner, BigQuery, Vector DB   │ • SERVICE-PLANE (2-Legged Workload Identity)    │
+│ (Enterprise Infrastructure Data)     │ • Uses Agent's Hardware-Attested SVID (Actor)   │
+│                                      │ • Authorized via GCP IAM (roles/spanner.user)   │
+└──────────────────────────────────────┴─────────────────────────────────────────────────┘
+```
+
+#### Dual-Plane Execution Pattern in Code:
+When the agent needs to query Spanner for `alice@corp.com`'s orders, it uses **Workload Identity to connect**, but **User OAuth JWT to filter**:
+
+```python
+from google.cloud import spanner
+from google.adk.tools import ToolContext
+
+# 1. Spanner client uses Workload Identity (ADC / SPIFFE SVID) automatically!
+spanner_client = spanner.Client()
+instance = spanner_client.instance("production-instance")
+database = instance.database("orders-database")
+
+def query_user_orders(tool_context: ToolContext) -> dict:
+    """Query Spanner for orders belonging to the authenticated user."""
+    
+    # 2. Extract verified user_id from the ephemeral OAuth JWT (Subject Plane)
+    creds = negotiate_creds(tool_context)
+    if isinstance(creds, dict):
+        return creds  # Pending auth
+        
+    user_email = creds.id_token_patterns.get("email")
+    
+    # 3. Query Spanner using Workload Identity (Actor Plane), filtered by Subject!
+    with database.snapshot() as snapshot:
+        results = snapshot.execute_sql(
+            "SELECT order_id, status, total_amount FROM Orders WHERE customer_email = @email",
+            params={"email": user_email},
+            param_types={"email": spanner.param_types.STRING}
+        )
+        orders = [dict(row) for row in results]
+        
+    return {"status": "success", "orders": orders}
+```
+
+> **Security Guarantee**: Even if a prompt injection attempts `SELECT * FROM Orders`, the tool hardcodes `WHERE customer_email = @email` using the cryptographically verified `sub`/`email` claim from `accounts.google.com`. The LLM cannot alter the SQL query's `WHERE` clause to see another user's data.
+
 ---
 
 ## 8. Negative Security Testing & Spoofing Defense Verification
