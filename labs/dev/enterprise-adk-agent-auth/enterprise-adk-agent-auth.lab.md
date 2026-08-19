@@ -315,6 +315,49 @@ def query_user_orders(tool_context: ToolContext) -> dict:
 
 > **Security Guarantee**: Even if a prompt injection attempts `SELECT * FROM Orders`, the tool hardcodes `WHERE customer_email = @email` using the cryptographically verified `sub`/`email` claim from `accounts.google.com`. The LLM cannot alter the SQL query's `WHERE` clause to see another user's data.
 
+### Step 7.4: The 3 Security Gates (What Needs to be "Allowed" Where?)
+
+A crucial architectural question is: **"Does the SPIFFE/Workload Identity (Service Account) used by the agent at runtime need to be explicitly 'allowed' to access the requested resources?"**
+
+#### The 3-Gate Security Evaluation Model:
+
+```text
+                       ┌─────────────────────────────────────────────────────────┐
+                       │                   THE 3 SECURITY GATES                  │
+                       └────────────────────────────┬────────────────────────────┘
+                                                    │
+                                                    ▼
+                       ┌─────────────────────────────────────────────────────────┐
+                       │ GATE 1: User OAuth 2.0 Scope & Consent (Subject)        │
+                       │ • Did the user grant 'drive.readonly'?                  │
+                       │ • Is the OAuth token valid and unexpired?               │
+                       └────────────────────────────┬────────────────────────────┘
+                                                    │
+                                                    ▼
+                       ┌─────────────────────────────────────────────────────────┐
+                       │ GATE 2: Workload IAM & Service Identity (Actor)         │
+                       │ • For Spanner/BigQuery: Does SA have IAM role?          │
+                       │ • For Drive: Is the SA's project the registered azp?   │
+                       └────────────────────────────┬────────────────────────────┘
+                                                    │
+                                                    ▼
+                       ┌─────────────────────────────────────────────────────────┐
+                       │ GATE 3: VPC Service Controls & Network Perimeter        │
+                       │ • Is the Agent Runtime inside an authorized VPC-SC?     │
+                       │ • Is the target API (Drive/Spanner) in the perimeter?   │
+                       └────────────────────────────┴────────────────────────────┘
+```
+
+#### Resource Authorization Matrix:
+
+| Security Dimension | Cloud Spanner / BigQuery (Service-Plane) | Google Drive / Gmail (User-Plane, Interactive) | Google Drive / Gmail (User-Plane, Headless / Cron) |
+| :--- | :--- | :--- | :--- |
+| **User OAuth Consent** | ❌ Not required | ✅ **Required** (`drive.readonly`) | ❌ Not required (bypassed via DWD) |
+| **Service Account GCP IAM Role** | ✅ **Required** (`roles/spanner.databaseUser`) | ❌ Not required (and discouraged!) | ❌ Not required |
+| **Workspace Domain-Wide Delegation (DWD)** | ❌ Not applicable | ❌ Not required | ✅ **Required** (configured in `admin.google.com`) |
+| **Discovery Engine `serverSideOauth2`** | ❌ Not applicable | ✅ **Required** | ❌ Not required |
+| **VPC-SC Perimeter Allowed Service** | ✅ **Required** (`spanner.googleapis.com`) | ✅ **Required** (`drive.googleapis.com`) | ✅ **Required** (`drive.googleapis.com`) |
+
 ---
 
 ## 8. Negative Security Testing & Spoofing Defense Verification
